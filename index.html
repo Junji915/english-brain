@@ -269,7 +269,6 @@
           htmlContent += `<button class="play-btn" onclick="playDirectUrl('${audioUrl}')">🔊 Voice</button>`;
         }
         if (translation) {
-          // エスケープ処理をしてクォーテーションのエラーを防ぐ
           const escapedTrans = translation.replace(/'/g, "\\'").replace(/"/g, '&quot;');
           htmlContent += `<button class="trans-btn" onclick="toggleTranslation(this, '${escapedTrans}')">🌐 Translate</button>`;
         }
@@ -292,14 +291,12 @@
       let transBox = messageDiv.querySelector('.translation-box');
       
       if (transBox) {
-        // すでに翻訳が表示されている場合は、非表示・表示を切り替える
         if (transBox.style.display === 'none') {
           transBox.style.display = 'block';
         } else {
           transBox.style.display = 'none';
         }
       } else {
-        // まだ翻訳ボックスがない場合は新しく作成
         transBox = document.createElement('div');
         transBox.className = 'translation-box';
         transBox.innerHTML = `<b>🇯🇵 日本語訳:</b><br>${translationText}`;
@@ -406,13 +403,22 @@
       {
         role: "system",
         content: `You are Sarah, an American woman working at CTI (Co-Active Training Institute) in the US. You are the liaison for Japan.
-        You are having a text-based meeting with Junji, the CEO of CTI Japan.
+        You are having a meeting with Junji, the CEO of CTI Japan.
         Discuss topics like organizational alignment, Distributed Leadership, and Co-Active coaching philosophy.
-        Be professional, collaborative, and friendly. Keep your responses concise (2-3 short sentences).
-        IMPORTANT RULES:
-        1. Evaluate Junji's English. At the end of your reply, you MUST provide feedback in Japanese. If his English is unnatural or grammatically incorrect, provide a natural alternative. Format exactly as: [Feedback: 〇〇]
-        2. You MUST also provide a natural Japanese translation of your own English message. Format exactly as: [Translation: 〇〇]
-        3. After the feedback and translation, you MUST append "[EXP: X]" where X is a number between 10 and 50 representing the experience points earned.`
+        Be professional, collaborative, and friendly. Keep your English responses concise (2-3 short sentences).
+
+        Strictly output your response in the following format. Do not mix up the sections:
+        [English Message]
+        (Write your natural English response to Junji here. 2-3 sentences max.)
+
+        [Translation]
+        (Provide a natural Japanese translation of ONLY the [English Message] section above. Do not include feedback or instructions here.)
+
+        [Feedback]
+        (Evaluate Junji's latest English input in Japanese. If his English has errors or sounds unnatural, provide a more natural, professional alternative suited for a CEO. If it's perfect, praise him.)
+
+        [EXP: X]
+        (Provide a number between 10 and 50 based on his English performance.)`
       },
       {
         role: "assistant",
@@ -484,41 +490,35 @@
         }
 
         const data = await response.json();
-        let aiText = data.choices[0].message.content;
+        let fullResponse = data.choices[0].message.content;
 
-        let earnedExp = 0;
+        let aiText = '';
         let feedbackText = '';
         let translationText = '';
-        
+        let earnedExp = 0;
+
         // EXPの抽出
-        const expMatch = aiText.match(/\[EXP:\s*(\d+)\]/);
-        if (expMatch) {
-          earnedExp = parseInt(expMatch[1], 10);
-          aiText = aiText.replace(/\[EXP:\s*\d+\]/, '').trim();
-        }
+        const expMatch = fullResponse.match(/\[EXP:\s*(\d+)\]/);
+        if (expMatch) earnedExp = parseInt(expMatch[1], 10);
 
-        // Feedbackの抽出
-        const feedbackMatch = aiText.match(/\[Feedback:\s*(.*?)\]/);
-        if (feedbackMatch) {
-          feedbackText = feedbackMatch[1];
-          aiText = aiText.replace(/\[Feedback:\s*.*?\]/, '').trim();
-        }
+        // 各セクションのパース
+        const englishMatch = fullResponse.match(/\[English Message\]([\s\S]*?)(?=\[Translation\]|\[Feedback\]|\[EXP:|$)/);
+        if (englishMatch) aiText = englishMatch[1].trim();
 
-        // Translationの抽出
-        const translationMatch = aiText.match(/\[Translation:\s*(.*?)\]/);
-        if (translationMatch) {
-          translationText = translationMatch[1];
-          aiText = aiText.replace(/\[Translation:\s*.*?\]/, '').trim();
-        }
+        const translationMatch = fullResponse.match(/\[Translation\]([\s\S]*?)(?=\[Feedback\]|\[EXP:|$)/);
+        if (translationMatch) translationText = translationMatch[1].trim();
+
+        const feedbackMatch = fullResponse.match(/\[Feedback\]([\s\S]*?)(?=\[EXP:|$)/);
+        if (feedbackMatch) feedbackText = feedbackMatch[1].trim();
+
+        // 万が一パースに失敗した時のフォールバック
+        if (!aiText) aiText = fullResponse;
 
         document.getElementById(loadingId).remove();
         
-        // 音声を生成
         const audioUrl = await generateAndPlayAudio(aiText, apiKey);
-        
-        // 翻訳データを含めてメッセージを表示
         appendMessage('npc', aiText, feedbackText, audioUrl, translationText);
-        chatHistory.push({ role: "assistant", content: data.choices[0].message.content });
+        chatHistory.push({ role: "assistant", content: fullResponse });
 
         if (earnedExp > 0) {
           setTimeout(() => {
