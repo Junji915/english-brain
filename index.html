@@ -385,3 +385,231 @@
     }
 
     // --- 音声認識 ---
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition;
+    let isRecording = false;
+
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.onresult = (event) => {
+        document.getElementById('userInput').value = event.results[0][0].transcript;
+      };
+      recognition.onend = () => {
+        isRecording = false;
+        document.getElementById('micBtn').classList.remove('recording');
+      };
+    }
+
+    function toggleMic() {
+      if (!recognition) return;
+      unlockAudio();
+      if (isRecording) {
+        recognition.stop();
+      } else {
+        recognition.start();
+        isRecording = true;
+        document.getElementById('micBtn').classList.add('recording');
+      }
+    }
+
+    function unlockAudio() {
+      player.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==";
+      player.play().catch(e => console.log("Audio unlock triggered"));
+    }
+
+    function playDirectUrl(url) {
+      player.src = url;
+      player.play().catch(e => alert("再生エラー: マナーモードがONになっていないか確認してください。"));
+    }
+
+    async function playDefaultGreeting() {
+      const apiKey = localStorage.getItem('openai_api_key');
+      if (!apiKey) return;
+      unlockAudio();
+      const greetingText = "Hi Junji! Thank you for making time today. I’m really excited to align our strategies for the upcoming quarter. How are things going with the team in Japan?";
+      await generateAndPlayAudio(greetingText, apiKey);
+    }
+
+    async function generateAndPlayAudio(text, apiKey) {
+      try {
+        const response = await fetch('https://api.openai.com/v1/audio/speech', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'tts-1',
+            voice: 'nova',
+            input: text
+          })
+        });
+
+        if (!response.ok) throw new Error('音声の自動生成に失敗しました。');
+        
+        const blob = await response.blob();
+        lastGeneratedBlobUrl = URL.createObjectURL(blob);
+        player.src = lastGeneratedBlobUrl;
+        player.play().catch(err => console.log("Auto-play blocked"));
+
+        return lastGeneratedBlobUrl;
+      } catch (error) {
+        console.error(error);
+        return null;
+      }
+    }
+
+    // --- AI（OpenAI API）連携 ---
+    let chatHistory = [
+      {
+        role: "system",
+        content: `You are Sarah, an American woman working at CTI (Co-Active Training Institute) in the US. You are the liaison for Japan.
+        You are having a meeting with Junji, the CEO of CTI Japan.
+        Discuss topics like organizational alignment, Distributed Leadership, and Co-Active coaching philosophy.
+        Be professional, collaborative, and friendly. Keep your English responses concise (2-3 short sentences).
+
+        Strictly output your response in the following format. Do not mix up the sections:
+        [English Message]
+        (Write your natural English response to Junji here. 2-3 sentences max.)
+
+        [Translation]
+        (Provide a natural Japanese translation of ONLY the [English Message] section above. Do not include feedback or instructions here.)
+
+        [Feedback]
+        (Evaluate Junji's latest English input in Japanese. If his English has errors or sounds unnatural, provide a more natural, professional alternative suited for a CEO. If it's perfect, praise him.)
+
+        [EXP: X]
+        (Provide a number between 10 and 50 based on his English performance.)`
+      },
+      {
+        role: "assistant",
+        content: "Hi Junji! Thank you for making time today. I’m really excited to align our strategies for the upcoming quarter. How are things going with the team in Japan?"
+      }
+    ];
+
+    window.onload = () => {
+      updateStatusUI();
+      if (!localStorage.getItem('openai_api_key')) {
+        document.getElementById('settingsArea').style.display = 'block';
+      }
+    };
+
+    function saveApiKey() {
+      const key = document.getElementById('apiKey').value.trim();
+      if (key) {
+        localStorage.setItem('openai_api_key', key);
+        document.getElementById('settingsArea').style.display = 'none';
+      }
+    }
+
+    function handleEnter(e) {
+      if (e.key === 'Enter') sendMessage();
+    }
+
+    async function sendMessage() {
+      const inputEl = document.getElementById('userInput');
+      const text = inputEl.value.trim();
+      const apiKey = localStorage.getItem('openai_api_key');
+
+      if (!text) return;
+      if (!apiKey) {
+        alert('APIキーを設定してください。');
+        return;
+      }
+
+      unlockAudio();
+      appendMessage('player', text);
+      inputEl.value = '';
+      chatHistory.push({ role: "user", content: text });
+
+      // ログにジュンジさんの発言を保存
+      sessionLogs.push({
+        speaker: "Junji",
+        english: text,
+        japanese: "",
+        feedback: ""
+      });
+
+      const loadingId = 'loading-' + Date.now();
+      const loadingDiv = document.createElement('div');
+      loadingDiv.className = 'message npc';
+      loadingDiv.id = loadingId;
+      loadingDiv.innerHTML = `<div class="npc-name">Sarah (CTI US)</div>Typing...`;
+      chatBox.appendChild(loadingDiv);
+      chatBox.scrollTop = chatBox.scrollHeight;
+
+      try {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: chatHistory,
+            temperature: 0.7
+          })
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData.error ? errData.error.message : `ステータスコード: ${response.status}`;
+          throw new Error(errMsg);
+        }
+
+        const data = await response.json();
+        let fullResponse = data.choices[0].message.content;
+
+        let aiText = '';
+        let feedbackText = '';
+        let translationText = '';
+        let earnedExp = 0;
+
+        // EXPの抽出
+        const expMatch = fullResponse.match(/\[EXP:\s*(\d+)\]/);
+        if (expMatch) earnedExp = parseInt(expMatch[1], 10);
+
+        // 各セクションのパース
+        const englishMatch = fullResponse.match(/\[English Message\]([\s\S]*?)(?=\[Translation\]|\[Feedback\]|\[EXP:|$)/);
+        if (englishMatch) aiText = englishMatch[1].trim();
+
+        const translationMatch = fullResponse.match(/\[Translation\]([\s\S]*?)(?=\[Feedback\]|\[EXP:|$)/);
+        if (translationMatch) translationText = translationMatch[1].trim();
+
+        const feedbackMatch = fullResponse.match(/\[Feedback\]([\s\S]*?)(?=\[EXP:|$)/);
+        if (feedbackMatch) feedbackText = feedbackMatch[1].trim();
+
+        if (!aiText) aiText = fullResponse;
+
+        document.getElementById(loadingId).remove();
+        
+        // ログにサラの発言とフィードバックを保存
+        sessionLogs.push({
+          speaker: "Sarah",
+          english: aiText,
+          japanese: translationText,
+          feedback: feedbackText
+        });
+
+        const audioUrl = await generateAndPlayAudio(aiText, apiKey);
+        appendMessage('npc', aiText, feedbackText, audioUrl, translationText);
+        chatHistory.push({ role: "assistant", content: fullResponse });
+
+        if (earnedExp > 0) {
+          setTimeout(() => {
+            appendSystemMessage(`✨ +${earnedExp} EXP 獲得`);
+            addExp(earnedExp);
+          }, 500);
+        }
+
+      } catch (error) {
+        document.getElementById(loadingId).remove();
+        appendErrorMessage(error.message);
+      }
+    }
+  </script>
+</body>
+</html>
